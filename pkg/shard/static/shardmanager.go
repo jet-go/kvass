@@ -18,6 +18,8 @@
 package static
 
 import (
+	"fmt"
+
 	"github.com/sirupsen/logrus"
 	"tkestack.io/kvass/pkg/shard"
 )
@@ -37,8 +39,9 @@ func newShardManager(shards []shardConfig, log logrus.FieldLogger) *shardManager
 // Shards return current Shards in the cluster
 func (s *shardManager) Shards() ([]*shard.Shard, error) {
 	ret := make([]*shard.Shard, 0)
-	for _, sd := range s.shards {
-		ret = append(ret, shard.NewShard(sd.ID, sd.URL, true, s.log.WithField("shard", sd.ID)))
+	for index, sd := range s.shards {
+		rep := shard.NewReplica(sd.ID, sd.URL, true, s.log.WithField("shard", sd.ID))
+		ret = append(ret, shard.NewShard(fmt.Sprintf("shard-%d", index), []*shard.Replica{rep}))
 	}
 	return ret, nil
 }

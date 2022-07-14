@@ -19,12 +19,13 @@ package kubernetes
 
 import (
 	"context"
+	"time"
+
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/apps/v1"
 	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"time"
 	"tkestack.io/kvass/pkg/shard"
 )
 
@@ -60,7 +61,8 @@ func NewReplicasManager(
 }
 
 // Replicas return all shards manager
-func (g *ReplicasManager) Replicas() ([]shard.Manager, error) {
+// TODO: rename method
+func (g *ReplicasManager) Replicas() (shard.Manager, error) {
 	sts, err := g.listStatefulSets(context.TODO(), v12.ListOptions{
 		LabelSelector: g.stsSelector,
 	})
@@ -68,7 +70,7 @@ func (g *ReplicasManager) Replicas() ([]shard.Manager, error) {
 		return nil, errors.Wrapf(err, "get statefulset")
 	}
 
-	ret := make([]shard.Manager, 0)
+	reps := make([]*v1.StatefulSet, 0)
 	for _, s := range sts.Items {
 		if s.Status.Replicas != s.Status.UpdatedReplicas {
 			g.lg.Warnf("Statefulset %s UpdatedReplicas != Replicas, skipped", s.Name)
@@ -89,8 +91,8 @@ func (g *ReplicasManager) Replicas() ([]shard.Manager, error) {
 		}
 
 		tempS := s
-		ret = append(ret, newShardManager(g.cli, &tempS, g.port, g.deletePVC, g.lg.WithField("sts", s.Name)))
+		reps = append(reps, &tempS)
 	}
-
-	return ret, nil
+	g.lg.Infof("total sts found count=%d", len(reps))
+	return newShardManager(g.cli, reps, g.port, g.deletePVC, g.lg.WithField("sts", g.stsSelector)), nil
 }

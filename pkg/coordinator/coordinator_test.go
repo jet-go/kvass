@@ -52,8 +52,8 @@ type fakeReplicasManager struct {
 	fd *fakeShardsManager
 }
 
-func (f *fakeReplicasManager) Replicas() ([]shard.Manager, error) {
-	return []shard.Manager{f.fd}, nil
+func (f *fakeReplicasManager) Replicas() (shard.Manager, error) {
+	return f.fd, nil
 }
 
 type fakeShardsManager struct {
@@ -66,9 +66,9 @@ type fakeShardsManager struct {
 func (f *fakeShardsManager) Shards() ([]*shard.Shard, error) {
 	ret := make([]*shard.Shard, 0)
 	for i, s := range f.shards {
-		sd := shard.NewShard(fmt.Sprint(i)+"-r0", "", true, logrus.New())
+		rep := shard.NewReplica(fmt.Sprint(i)+"-r0", "", true, logrus.New())
 		temp := s
-		sd.APIGet = func(url string, ret interface{}) error {
+		rep.APIGet = func(url string, ret interface{}) error {
 			dm := map[string]interface{}{
 				"/api/v1/shard/targets/":        temp.targetStatus,
 				"/api/v1/shard/targets/status/": temp.targetStatus,
@@ -78,11 +78,11 @@ func (f *fakeShardsManager) Shards() ([]*shard.Shard, error) {
 			return test.CopyJSON(ret, dm[url])
 		}
 
-		sd.APIPost = func(url string, req interface{}, ret interface{}) (err error) {
+		rep.APIPost = func(url string, req interface{}, ret interface{}) (err error) {
 			return test.CopyJSON(&temp.resultTargets, req)
 		}
 
-		ret = append(ret, sd)
+		ret = append(ret, shard.NewShard(fmt.Sprint(i)+"-s0", []*shard.Replica{rep}))
 	}
 
 	return ret, nil
