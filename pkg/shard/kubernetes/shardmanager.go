@@ -20,6 +20,7 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -90,12 +91,15 @@ func (s *shardManager) Shards() ([]*shard.Shard, error) {
 			for index := range pods.Items {
 				p := ps[fmt.Sprintf("%s-%d", sts.Name, index)]
 				url := fmt.Sprintf("http://%s:%d", p.Status.PodIP, s.port)
-
-				rep := shard.NewReplica(p.Name, url, p.Status.PodIP != "", s.lg.WithField("shard", p.Name))
-
 				shardName := fmt.Sprintf("shard-%d", index)
+
+				rep := shard.NewReplica(p.Name, url, p.Status.PodIP != "", s.lg.WithFields(logrus.Fields{
+					"shard":   shardName,
+					"replica": p.Name,
+				}))
 				if sh, ok := shards[shardName]; ok {
 					shards[shardName] = append(sh, rep)
+					continue
 				}
 				shards[shardName] = []*shard.Replica{rep}
 			}
@@ -107,9 +111,13 @@ func (s *shardManager) Shards() ([]*shard.Shard, error) {
 		return nil, err
 	}
 	for name, reps := range shards {
-		ret = append(ret, shard.NewShard(name, reps))
+		ret = append(ret, shard.NewShard(name, reps, s.lg.WithField("shard", name)))
 	}
-	s.lg.Infof("total shards founds: %d", len(ret))
+	sort.Slice(ret, func(i, j int) bool {
+		return ret[i].ID < ret[j].ID
+	})
+
+	s.lg.Infof("total shards is %d", len(ret))
 
 	return ret, nil
 }
@@ -131,7 +139,7 @@ func (s *shardManager) ChangeScale(expect int32) error {
 
 			old := *sts.Spec.Replicas
 			sts.Spec.Replicas = &expect
-			s.lg.Infof("change scale to %d", expect)
+			s.lg.Infof("change scale to %d for sts %s", expect, st.Name)
 			_, err = s.cli.AppsV1().StatefulSets(sts.Namespace).Update(context.TODO(), sts, v12.UpdateOptions{})
 			if err != nil {
 				return errors.Wrapf(err, "update statefuleset %s replicate failed", sts.Name)

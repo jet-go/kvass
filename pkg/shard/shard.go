@@ -35,6 +35,7 @@ type Shard struct {
 	// ID is the unique ID for differentiate each shard
 	ID       string
 	Replicas []*Replica
+	log      logrus.FieldLogger
 }
 
 type Replica struct {
@@ -56,10 +57,11 @@ type Replica struct {
 }
 
 // NewShard create a Shard
-func NewShard(id string, reps []*Replica) *Shard {
+func NewShard(id string, reps []*Replica, log logrus.FieldLogger) *Shard {
 	return &Shard{
 		ID:       id,
 		Replicas: reps,
+		log: log,
 	}
 }
 
@@ -132,41 +134,6 @@ func (s *Shard) Samples(jobName string, withMetricsDetail bool) (scrapeStatSerie
 	}
 
 	return scrapeStatSeries{}, err
-}
-
-type runTimeInfoResult struct {
-	data   *RuntimeInfo
-	status bool
-}
-
-// RuntimeInfo return the runtime status of this shard
-func (s *Shard) RuntimeInfo() (*RuntimeInfo, error) {
-	g := errgroup.Group{}
-	result := make([]*runTimeInfoResult, len(s.Replicas))
-
-	for i, rep := range s.Replicas {
-		rep := rep
-		i := i
-		g.Go(func() error {
-			res := &RuntimeInfo{}
-			err := rep.APIGet(rep.url+"/api/v1/shard/runtimeinfo/", &res)
-			if err != nil {
-				return fmt.Errorf("get runtime info from %s failed : %s", rep.ID, err.Error())
-			}
-			result[i] = &runTimeInfoResult{res, true}
-			return nil
-		})
-	}
-	err := g.Wait()
-
-	// return the data from any succesful shard replica
-	for _, res := range result {
-		if res.status {
-			return res.data, nil
-		}
-	}
-
-	return &RuntimeInfo{}, err
 }
 
 // RuntimeInfo return the runtime status of this shard
@@ -269,7 +236,7 @@ func (s *Shard) UpdateTarget(request *UpdateTargetsRequest) error {
 		g.Go(func() error {
 			if rep.needUpdate(newTargets) {
 				if len(newTargets) != 0 || len(rep.scraping) != 0 {
-					rep.log.Infof("%s need update targets", rep.ID)
+					rep.log.Info("need update targets")
 				}
 				return rep.APIPost(rep.url+"/api/v1/shard/targets/", &request, nil)
 			}

@@ -151,7 +151,7 @@ func (c *Coordinator) getOneShardInfo(s *shard.Shard) *shardInfo {
 			}
 
 			// reload runtime
-			runtime, err = s.RuntimeInfo()
+			runtime, err = rep.RuntimeInfo()
 			if err != nil {
 				c.log.Error(err.Error())
 				continue

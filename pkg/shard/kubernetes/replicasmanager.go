@@ -93,6 +93,6 @@ func (g *ReplicasManager) Replicas() (shard.Manager, error) {
 		tempS := s
 		reps = append(reps, &tempS)
 	}
-	g.lg.Infof("total sts found count=%d", len(reps))
-	return newShardManager(g.cli, reps, g.port, g.deletePVC, g.lg.WithField("sts", g.stsSelector)), nil
+	g.lg.Infof("total sts is %d", len(reps))
+	return newShardManager(g.cli, reps, g.port, g.deletePVC, g.lg.WithField("selector", g.stsSelector)), nil
 }

@@ -119,8 +119,7 @@ func (c *Coordinator) LastScrapeStatistics(jobName string, withMetricsDetail boo
 	}
 
 	ret := map[string]*scrape.StatisticsSeriesResult{}
-	
-	// for _, m := range rep {
+
 	w := errgroup.Group{}
 	rp := map[string]*scrape.StatisticsSeriesResult{}
 	lk := sync.Mutex{}
@@ -173,7 +172,7 @@ func (c *Coordinator) LastScrapeStatistics(jobName string, withMetricsDetail boo
 			ret[k] = v
 		}
 	}
-	// }
+
 	return ret, nil
 }
 
@@ -196,7 +195,6 @@ func (c *Coordinator) runOnce() (err error) {
 	if err != nil {
 		return err
 	}
-
 
 	newLastGlobalScrapeStatus := map[uint64]*target.ScrapeStatus{}
 	// loop begin

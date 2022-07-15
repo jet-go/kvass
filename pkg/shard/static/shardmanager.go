@@ -40,8 +40,10 @@ func newShardManager(shards []shardConfig, log logrus.FieldLogger) *shardManager
 func (s *shardManager) Shards() ([]*shard.Shard, error) {
 	ret := make([]*shard.Shard, 0)
 	for index, sd := range s.shards {
-		rep := shard.NewReplica(sd.ID, sd.URL, true, s.log.WithField("shard", sd.ID))
-		ret = append(ret, shard.NewShard(fmt.Sprintf("shard-%d", index), []*shard.Replica{rep}))
+		sID := fmt.Sprintf("shard-%d", index)
+		sLog := s.log.WithField("shard", sID)
+		rep := shard.NewReplica(sd.ID, sd.URL, true, sLog.WithField("replica", sd.ID))
+		ret = append(ret, shard.NewShard(sID, []*shard.Replica{rep}, sLog))
 	}
 	return ret, nil
 }

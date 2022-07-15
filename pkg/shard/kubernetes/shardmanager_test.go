@@ -78,7 +78,7 @@ func TestStatefulSet_Shards(t *testing.T) {
 		pl := &v1.PodList{}
 		for i := 0; i < 2; i++ {
 			p := v1.Pod{}
-			p.Name += fmt.Sprintf("rep1-%d", i)
+			p.Name += fmt.Sprintf("%s-%d", lb["rep"], i)
 			p.Status.Conditions = []v1.PodCondition{
 				{
 					Type:   v1.PodReady,
@@ -95,6 +95,8 @@ func TestStatefulSet_Shards(t *testing.T) {
 	r := require.New(t)
 	r.NoError(err)
 	r.Equal(2, len(shards))
+	r.Equal(2, len(shards[0].Replicas))
+	r.Equal(2, len(shards[1].Replicas))
 }
 
 func TestStatefulSet_ChangeScale(t *testing.T) {

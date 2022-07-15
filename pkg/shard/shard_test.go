@@ -35,21 +35,24 @@ import (
 func newTestingShard(t *testing.T) (*Shard, *require.Assertions) {
 	lg := logrus.New()
 	r := NewReplica("0", "", true, lg)
-	s := NewShard("0", []*Replica{r})
+	s := NewShard("0", []*Replica{r}, lg)
 	return s, require.New(t)
 }
 
 func TestShard_RuntimeInfo(t *testing.T) {
 	s, r := newTestingShard(t)
-	s.Replicas[0].APIGet = func(url string, ret interface{}) error {
-		return test.CopyJSON(ret, &RuntimeInfo{
-			HeadSeries: 10,
-		})
+	var err error
+	var res *RuntimeInfo
+	for _, rep := range s.Replicas {
+		s.Replicas[0].APIGet = func(url string, ret interface{}) error {
+			return test.CopyJSON(ret, &RuntimeInfo{
+				HeadSeries: 10,
+			})
+		}
+		res, err = rep.RuntimeInfo()
+		r.NoError(err)
+		r.Equal(int64(10), res.HeadSeries)
 	}
-
-	res, err := s.RuntimeInfo()
-	r.NoError(err)
-	r.Equal(int64(10), res.HeadSeries)
 }
 
 func TestShard_TargetStatus(t *testing.T) {
