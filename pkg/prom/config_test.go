@@ -99,7 +99,7 @@ scrape_configs:
 			m.AddReloadCallbacks(func(cfg *ConfigInfo) error {
 				updated = true
 				r.Equal(string(cfg.RawContent), c.content)
-				r.Equal("16727296455050936695", cfg.ConfigHash)
+				r.Equal("413639151925687730", cfg.ConfigHash)
 				r.Equal(1, len(cfg.Config.ScrapeConfigs))
 				return nil
 			})

@@ -70,14 +70,15 @@ func createStatefulSet(t *testing.T, cli kubernetes.Interface, name string, rep 
 
 func TestStatefulSet_Shards(t *testing.T) {
 	cli := fake.NewSimpleClientset()
-	sf := createStatefulSet(t, cli, "rep1", 2)
+	sf1 := createStatefulSet(t, cli, "rep1", 2)
+	sf2 := createStatefulSet(t, cli, "rep2", 2)
 
-	sts := newShardManager(cli, sf, 8080, true, logrus.New())
+	sts := newShardManager(cli, []*appsv1.StatefulSet{sf1, sf2}, 8080, true, logrus.New())
 	sts.getPods = func(lb map[string]string) (list *v1.PodList, e error) {
 		pl := &v1.PodList{}
 		for i := 0; i < 2; i++ {
 			p := v1.Pod{}
-			p.Name += fmt.Sprintf("rep1-%d", i)
+			p.Name += fmt.Sprintf("%s-%d", lb["rep"], i)
 			p.Status.Conditions = []v1.PodCondition{
 				{
 					Type:   v1.PodReady,
@@ -94,6 +95,8 @@ func TestStatefulSet_Shards(t *testing.T) {
 	r := require.New(t)
 	r.NoError(err)
 	r.Equal(2, len(shards))
+	r.Equal(2, len(shards[0].Replicas))
+	r.Equal(2, len(shards[1].Replicas))
 }
 
 func TestStatefulSet_ChangeScale(t *testing.T) {
@@ -110,7 +113,7 @@ func testScaleUp(t *testing.T) {
 	r := require.New(t)
 	cli := fake.NewSimpleClientset()
 	sf := createStatefulSet(t, cli, "rep1", 2)
-	sts := newShardManager(cli, sf, 8080, true, logrus.New())
+	sts := newShardManager(cli, []*appsv1.StatefulSet{sf}, 8080, true, logrus.New())
 	r.NoError(sts.ChangeScale(10))
 	s, err := cli.AppsV1().StatefulSets("default").Get(context.TODO(), "rep1", v12.GetOptions{})
 	r.NoError(err)
@@ -121,7 +124,7 @@ func testScaleDown(t *testing.T, deletePvc bool) {
 	r := require.New(t)
 	cli := fake.NewSimpleClientset()
 	sf := createStatefulSet(t, cli, "rep1", 2)
-	sts := newShardManager(cli, sf, 8080, deletePvc, logrus.New())
+	sts := newShardManager(cli, []*appsv1.StatefulSet{sf}, 8080, deletePvc, logrus.New())
 	r.NoError(sts.ChangeScale(1))
 	s, err := cli.AppsV1().StatefulSets("default").Get(context.TODO(), "rep1", v12.GetOptions{})
 	r.NoError(err)

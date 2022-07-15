@@ -26,7 +26,7 @@ import (
 // ReplicasManager known all shard managers
 type ReplicasManager interface {
 	// Replicas return all replicas
-	Replicas() ([]Manager, error)
+	Replicas() (Manager, error)
 }
 
 // Manager known how to create or delete Shards

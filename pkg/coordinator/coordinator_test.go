@@ -52,8 +52,8 @@ type fakeReplicasManager struct {
 	fd *fakeShardsManager
 }
 
-func (f *fakeReplicasManager) Replicas() ([]shard.Manager, error) {
-	return []shard.Manager{f.fd}, nil
+func (f *fakeReplicasManager) Replicas() (shard.Manager, error) {
+	return f.fd, nil
 }
 
 type fakeShardsManager struct {
@@ -66,9 +66,9 @@ type fakeShardsManager struct {
 func (f *fakeShardsManager) Shards() ([]*shard.Shard, error) {
 	ret := make([]*shard.Shard, 0)
 	for i, s := range f.shards {
-		sd := shard.NewShard(fmt.Sprint(i)+"-r0", "", true, logrus.New())
+		rep := shard.NewReplica(fmt.Sprint(i)+"-r0", "", true, logrus.New())
 		temp := s
-		sd.APIGet = func(url string, ret interface{}) error {
+		rep.APIGet = func(url string, ret interface{}) error {
 			dm := map[string]interface{}{
 				"/api/v1/shard/targets/":        temp.targetStatus,
 				"/api/v1/shard/targets/status/": temp.targetStatus,
@@ -78,11 +78,11 @@ func (f *fakeShardsManager) Shards() ([]*shard.Shard, error) {
 			return test.CopyJSON(ret, dm[url])
 		}
 
-		sd.APIPost = func(url string, req interface{}, ret interface{}) (err error) {
+		rep.APIPost = func(url string, req interface{}, ret interface{}) (err error) {
 			return test.CopyJSON(&temp.resultTargets, req)
 		}
 
-		ret = append(ret, sd)
+		ret = append(ret, shard.NewShard(fmt.Sprint(i)+"-s0", []*shard.Replica{rep}, logrus.New()))
 	}
 
 	return ret, nil
@@ -112,6 +112,7 @@ func TestCoordinator_RunOnce(t *testing.T) {
 	var cases = []struct {
 		name             string
 		maxSeries        int64
+		maxProcessSeries int64
 		maxShard         int32
 		minShard         int32
 		maxIdleTime      time.Duration
@@ -121,10 +122,11 @@ func TestCoordinator_RunOnce(t *testing.T) {
 		shardManager     *fakeShardsManager
 	}{
 		{
-			name:        "delete not exist target",
-			maxSeries:   1000,
-			maxShard:    1000,
-			maxIdleTime: time.Second,
+			name:             "delete not exist target",
+			maxSeries:        1000,
+			maxShard:         1000,
+			maxProcessSeries: 1000,
+			maxIdleTime:      time.Second,
 			getActive: func() map[uint64]*discovery.SDTargets {
 				return map[uint64]*discovery.SDTargets{}
 			},
@@ -144,10 +146,11 @@ func TestCoordinator_RunOnce(t *testing.T) {
 			},
 		},
 		{
-			name:        "assign new target normally",
-			maxSeries:   1000,
-			maxShard:    1000,
-			maxIdleTime: time.Second,
+			name:             "assign new target normally",
+			maxSeries:        1000,
+			maxShard:         1000,
+			maxProcessSeries: 1000,
+			maxIdleTime:      time.Second,
 			getActive: func() map[uint64]*discovery.SDTargets {
 				return map[uint64]*discovery.SDTargets{
 					1: {
@@ -185,10 +188,11 @@ func TestCoordinator_RunOnce(t *testing.T) {
 			},
 		},
 		{
-			name:        "assign new target, shard not changeable, don't scale up",
-			maxSeries:   1000,
-			maxShard:    1000,
-			maxIdleTime: time.Second,
+			name:             "assign new target, shard not changeable, don't scale up",
+			maxSeries:        1000,
+			maxShard:         1000,
+			maxProcessSeries: 1000,
+			maxIdleTime:      time.Second,
 			getActive: func() map[uint64]*discovery.SDTargets {
 				return map[uint64]*discovery.SDTargets{
 					1: {
@@ -218,10 +222,11 @@ func TestCoordinator_RunOnce(t *testing.T) {
 			},
 		},
 		{
-			name:        "assign new target, need scale up, but max shard limit ",
-			maxSeries:   1000,
-			maxShard:    0,
-			maxIdleTime: time.Second,
+			name:             "assign new target, need scale up, but max shard limit ",
+			maxSeries:        1000,
+			maxShard:         0,
+			maxProcessSeries: 1000,
+			maxIdleTime:      time.Second,
 			getActive: func() map[uint64]*discovery.SDTargets {
 				return map[uint64]*discovery.SDTargets{
 					1: {
@@ -240,10 +245,11 @@ func TestCoordinator_RunOnce(t *testing.T) {
 			},
 		},
 		{
-			name:        "assign new target, need scale up",
-			maxSeries:   1000,
-			maxShard:    1000,
-			maxIdleTime: time.Second,
+			name:             "assign new target, need scale up",
+			maxSeries:        1000,
+			maxShard:         1000,
+			maxProcessSeries: 1000,
+			maxIdleTime:      time.Second,
 			getActive: func() map[uint64]*discovery.SDTargets {
 				return map[uint64]*discovery.SDTargets{
 					1: {
@@ -262,10 +268,11 @@ func TestCoordinator_RunOnce(t *testing.T) {
 			},
 		},
 		{
-			name:        "shard overload, no space, need scale up",
-			maxSeries:   1000,
-			maxShard:    1000,
-			maxIdleTime: time.Second,
+			name:             "shard overload, no space, need scale up",
+			maxSeries:        1000,
+			maxShard:         1000,
+			maxProcessSeries: 1000,
+			maxIdleTime:      time.Second,
 			getActive: func() map[uint64]*discovery.SDTargets {
 				return map[uint64]*discovery.SDTargets{
 					1: {
@@ -298,10 +305,11 @@ func TestCoordinator_RunOnce(t *testing.T) {
 			},
 		},
 		{
-			name:        "shard overload, transfer begin",
-			maxSeries:   1000,
-			maxShard:    1000,
-			maxIdleTime: time.Second,
+			name:             "shard overload, transfer begin",
+			maxSeries:        1000,
+			maxShard:         1000,
+			maxProcessSeries: 1000,
+			maxIdleTime:      time.Second,
 			getActive: func() map[uint64]*discovery.SDTargets {
 				return map[uint64]*discovery.SDTargets{
 					1: {
@@ -359,10 +367,11 @@ func TestCoordinator_RunOnce(t *testing.T) {
 			},
 		},
 		{
-			name:        "shard overload, transfer end",
-			maxSeries:   1000,
-			maxShard:    1000,
-			maxIdleTime: time.Second,
+			name:             "shard overload, transfer end",
+			maxSeries:        1000,
+			maxShard:         1000,
+			maxProcessSeries: 1000,
+			maxIdleTime:      time.Second,
 			getActive: func() map[uint64]*discovery.SDTargets {
 				return map[uint64]*discovery.SDTargets{
 					1: {
@@ -412,10 +421,11 @@ func TestCoordinator_RunOnce(t *testing.T) {
 			},
 		},
 		{
-			name:        "shard can be removed, transfer begin",
-			maxSeries:   1000,
-			maxShard:    1000,
-			maxIdleTime: time.Second,
+			name:             "shard can be removed, transfer begin",
+			maxSeries:        1000,
+			maxShard:         1000,
+			maxProcessSeries: 1000,
+			maxIdleTime:      time.Second,
 			getActive: func() map[uint64]*discovery.SDTargets {
 				return map[uint64]*discovery.SDTargets{
 					1: {
@@ -474,10 +484,11 @@ func TestCoordinator_RunOnce(t *testing.T) {
 			},
 		},
 		{
-			name:        "shard can be removed, transfer end, begin idle",
-			maxSeries:   1000,
-			maxShard:    1000,
-			maxIdleTime: time.Second,
+			name:             "shard can be removed, transfer end, begin idle",
+			maxSeries:        1000,
+			maxShard:         1000,
+			maxProcessSeries: 1000,
+			maxIdleTime:      time.Second,
 			getActive: func() map[uint64]*discovery.SDTargets {
 				return map[uint64]*discovery.SDTargets{
 					1: {
@@ -527,10 +538,11 @@ func TestCoordinator_RunOnce(t *testing.T) {
 			},
 		},
 		{
-			name:        "shard can be removed, transfer end, shard removed",
-			maxSeries:   1000,
-			maxShard:    1000,
-			maxIdleTime: time.Second,
+			name:             "shard can be removed, transfer end, shard removed",
+			maxSeries:        1000,
+			maxShard:         1000,
+			maxProcessSeries: 1000,
+			maxIdleTime:      time.Second,
 			getActive: func() map[uint64]*discovery.SDTargets {
 				return map[uint64]*discovery.SDTargets{
 					1: {
@@ -576,11 +588,12 @@ func TestCoordinator_RunOnce(t *testing.T) {
 	for _, cs := range cases {
 		t.Run(cs.name, func(t *testing.T) {
 			option := &Option{
-				MaxHeadSeries: cs.maxSeries,
-				MaxShard:      cs.maxShard,
-				MinShard:      cs.minShard,
-				MaxIdleTime:   cs.maxIdleTime,
-				Period:        cs.period,
+				MaxHeadSeries:    cs.maxSeries,
+				MaxProcessSeries: cs.maxProcessSeries,
+				MaxShard:         cs.maxShard,
+				MinShard:         cs.minShard,
+				MaxIdleTime:      cs.maxIdleTime,
+				Period:           cs.period,
 			}
 			c := NewCoordinator(option,
 				&fakeReplicasManager{cs.shardManager},

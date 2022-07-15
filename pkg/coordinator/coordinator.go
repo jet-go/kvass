@@ -113,66 +113,66 @@ func (c *Coordinator) LastGlobalScrapeStatus() map[uint64]*target.ScrapeStatus {
 
 // LastScrapeStatistics collect targets scrape sample statistic from all shards
 func (c *Coordinator) LastScrapeStatistics(jobName string, withMetricsDetail bool) (map[string]*scrape.StatisticsSeriesResult, error) {
-	rep, err := c.reManager.Replicas()
+	m, err := c.reManager.Replicas()
 	if err != nil {
 		return nil, err
 	}
 
 	ret := map[string]*scrape.StatisticsSeriesResult{}
-	for _, m := range rep {
-		w := errgroup.Group{}
-		rp := map[string]*scrape.StatisticsSeriesResult{}
-		lk := sync.Mutex{}
-		shards, err := m.Shards()
-		if err != nil {
-			c.log.Errorf(err.Error())
+
+	w := errgroup.Group{}
+	rp := map[string]*scrape.StatisticsSeriesResult{}
+	lk := sync.Mutex{}
+	shards, err := m.Shards()
+	if err != nil {
+		c.log.Errorf(err.Error())
+		return rp, err
+	}
+
+	for _, tmp := range shards {
+		s := tmp
+		if !s.Ready() {
 			continue
 		}
 
-		for _, tmp := range shards {
-			s := tmp
-			if !s.Ready {
-				continue
+		w.Go(func() error {
+			sp, err := s.Samples(jobName, withMetricsDetail)
+			if err != nil {
+				return err
 			}
+			lk.Lock()
+			defer lk.Unlock()
 
-			w.Go(func() error {
-				sp, err := s.Samples(jobName, withMetricsDetail)
-				if err != nil {
-					return err
+			for job, result := range sp {
+				item := rp[job]
+				if item == nil {
+					item = scrape.NewStatisticsSeriesResult()
+					rp[job] = item
 				}
-				lk.Lock()
-				defer lk.Unlock()
 
-				for job, result := range sp {
-					item := rp[job]
-					if item == nil {
-						item = scrape.NewStatisticsSeriesResult()
-						rp[job] = item
+				item.ScrapedTotal += result.ScrapedTotal
+				for k, m := range result.MetricsTotal {
+					mi := item.MetricsTotal[k]
+					if mi == nil {
+						mi = &scrape.MetricSamplesInfo{}
+						item.MetricsTotal[k] = mi
 					}
-
-					item.ScrapedTotal += result.ScrapedTotal
-					for k, m := range result.MetricsTotal {
-						mi := item.MetricsTotal[k]
-						if mi == nil {
-							mi = &scrape.MetricSamplesInfo{}
-							item.MetricsTotal[k] = mi
-						}
-						mi.Total += m.Total
-						mi.Scraped += m.Scraped
-					}
+					mi.Total += m.Total
+					mi.Scraped += m.Scraped
 				}
-				return nil
-			})
-		}
-		_ = w.Wait()
-
-		// merget all replicas
-		for k, v := range rp {
-			if ret[k] == nil {
-				ret[k] = v
 			}
+			return nil
+		})
+	}
+	_ = w.Wait()
+
+	// merget all replicas
+	for k, v := range rp {
+		if ret[k] == nil {
+			ret[k] = v
 		}
 	}
+
 	return ret, nil
 }
 
@@ -185,68 +185,62 @@ func (c *Coordinator) runOnce() (err error) {
 		}
 	}()
 
-	replicas, err := c.reManager.Replicas()
+	// tood: rename method
+	manager, err := c.reManager.Replicas()
 	if err != nil {
 		return errors.Wrap(err, "get replicas")
 	}
 
-	if len(replicas) == 0 {
-		return errors.New("no shards replicas is found")
+	shards, err := manager.Shards()
+	if err != nil {
+		return err
 	}
 
 	newLastGlobalScrapeStatus := map[uint64]*target.ScrapeStatus{}
-	for _, repItem := range replicas {
-		shards, err := repItem.Shards()
-		if err != nil {
+	// loop begin
+	var (
+		active           = c.getActive()
+		shardsInfo       = c.getShardInfos(shards)
+		changeAbleShards = changeAbleShardsInfo(shardsInfo)
+	)
+
+	if int32(len(changeAbleShards)) < c.option.MinShard { // insure that scaling up to min shard
+		if err := manager.ChangeScale(c.option.MinShard); err != nil {
 			c.log.Error(err.Error())
-			continue
 		}
-
-		var (
-			active           = c.getActive()
-			shardsInfo       = c.getShardInfos(shards)
-			changeAbleShards = changeAbleShardsInfo(shardsInfo)
-		)
-
-		if int32(len(changeAbleShards)) < c.option.MinShard { // insure that scaling up to min shard
-			if err := repItem.ChangeScale(c.option.MinShard); err != nil {
-				c.log.Error(err.Error())
-				continue
-			}
-		}
-
-		lastGlobalScrapeStatus := c.globalScrapeStatus(active, shardsInfo)
-		c.gcTargets(changeAbleShards, active)
-		needSpace := c.alleviateShards(changeAbleShards)
-		needSpace.add(c.assignNoScrapingTargets(shardsInfo, active, lastGlobalScrapeStatus))
-
-		scale := int32(len(shardsInfo))
-		if !needSpace.isZero() {
-			c.log.Infof("need space head space = %d, process space = %d", needSpace.headSpace, needSpace.processSpace)
-			scale = c.tryScaleUp(shardsInfo, needSpace)
-		} else if c.option.MaxIdleTime != 0 {
-			scale = c.tryScaleDown(shardsInfo)
-		}
-
-		if scale > c.option.MaxShard {
-			scale = c.option.MaxShard
-		}
-
-		if scale < c.option.MinShard {
-			scale = c.option.MinShard
-		}
-
-		updateScrapingTargets(shardsInfo, active)
-		c.applyShardsInfo(shardsInfo)
-		if err := repItem.ChangeScale(scale); err != nil {
-			c.log.Error(err.Error())
-			continue
-		}
-
-		lastGlobalScrapeStatus = c.updateScrapeStatusShards(shardsInfo, lastGlobalScrapeStatus)
-		newLastGlobalScrapeStatus = mergeScrapeStatus(newLastGlobalScrapeStatus, lastGlobalScrapeStatus)
 	}
 
+	lastGlobalScrapeStatus := c.globalScrapeStatus(active, shardsInfo)
+	c.gcTargets(changeAbleShards, active)
+	needSpace := c.alleviateShards(changeAbleShards)
+	needSpace.add(c.assignNoScrapingTargets(shardsInfo, active, lastGlobalScrapeStatus))
+
+	scale := int32(len(shardsInfo))
+	if !needSpace.isZero() {
+		c.log.Infof("need space head space = %d, process space = %d", needSpace.headSpace, needSpace.processSpace)
+		scale = c.tryScaleUp(shardsInfo, needSpace)
+	} else if c.option.MaxIdleTime != 0 {
+		scale = c.tryScaleDown(shardsInfo)
+	}
+
+	if scale > c.option.MaxShard {
+		scale = c.option.MaxShard
+	}
+
+	if scale < c.option.MinShard {
+		scale = c.option.MinShard
+	}
+
+	updateScrapingTargets(shardsInfo, active)
+	c.applyShardsInfo(shardsInfo)
+	if err := manager.ChangeScale(scale); err != nil {
+		c.log.Error(err.Error())
+	}
+
+	lastGlobalScrapeStatus = c.updateScrapeStatusShards(shardsInfo, lastGlobalScrapeStatus)
+	newLastGlobalScrapeStatus = mergeScrapeStatus(newLastGlobalScrapeStatus, lastGlobalScrapeStatus)
+
+	// after loop
 	c.lastGlobalScrapeStatus = newLastGlobalScrapeStatus
 	return nil
 }

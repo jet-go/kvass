@@ -112,7 +112,7 @@ func TestReplicasManager_Replicas(t *testing.T) {
 				r.Error(err)
 				return
 			}
-			r.Equal(c.wantShardManager, len(res))
+			r.Equal(c.wantShardManager, res)
 		})
 	}
 }

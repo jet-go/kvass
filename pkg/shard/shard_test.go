@@ -34,21 +34,25 @@ import (
 
 func newTestingShard(t *testing.T) (*Shard, *require.Assertions) {
 	lg := logrus.New()
-	s := NewShard("0", "", true, lg)
+	r := NewReplica("0", "", true, lg)
+	s := NewShard("0", []*Replica{r}, lg)
 	return s, require.New(t)
 }
 
 func TestShard_RuntimeInfo(t *testing.T) {
 	s, r := newTestingShard(t)
-	s.APIGet = func(url string, ret interface{}) error {
-		return test.CopyJSON(ret, &RuntimeInfo{
-			HeadSeries: 10,
-		})
+	var err error
+	var res *RuntimeInfo
+	for _, rep := range s.Replicas {
+		s.Replicas[0].APIGet = func(url string, ret interface{}) error {
+			return test.CopyJSON(ret, &RuntimeInfo{
+				HeadSeries: 10,
+			})
+		}
+		res, err = rep.RuntimeInfo()
+		r.NoError(err)
+		r.Equal(int64(10), res.HeadSeries)
 	}
-
-	res, err := s.RuntimeInfo()
-	r.NoError(err)
-	r.Equal(int64(10), res.HeadSeries)
 }
 
 func TestShard_TargetStatus(t *testing.T) {
@@ -60,7 +64,7 @@ func TestShard_TargetStatus(t *testing.T) {
 		Health:             scrape.HealthBad,
 		Series:             100,
 	}
-	s.APIGet = func(url string, ret interface{}) error {
+	s.Replicas[0].APIGet = func(url string, ret interface{}) error {
 		return test.CopyJSON(ret, map[uint64]*target.ScrapeStatus{
 			1: st,
 		})
@@ -130,8 +134,8 @@ func TestShard_UpdateTarget(t *testing.T) {
 	for _, cs := range cases {
 		t.Run(cs.name, func(t *testing.T) {
 			s, r := newTestingShard(t)
-			s.scraping = cs.curScraping
-			s.APIPost = func(url string, req interface{}, ret interface{}) (err error) {
+			s.Replicas[0].scraping = cs.curScraping
+			s.Replicas[0].APIPost = func(url string, req interface{}, ret interface{}) (err error) {
 				r.True(cs.wantUpdate)
 				return nil
 			}
@@ -221,7 +225,7 @@ func TestShard_Samples(t *testing.T) {
 	for _, cs := range cases {
 		t.Run(cs.desc, func(t *testing.T) {
 			s, r := newTestingShard(t)
-			s.APIGet = fakeGet
+			s.Replicas[0].APIGet = fakeGet
 			res, err := s.Samples(cs.jobName, cs.withDetail)
 			r.NoError(err)
 			r.JSONEq(test.MustJSON(cs.wantResult), test.MustJSON(res))

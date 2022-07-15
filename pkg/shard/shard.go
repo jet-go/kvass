@@ -23,6 +23,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/errgroup"
 	"tkestack.io/kvass/pkg/api"
 	"tkestack.io/kvass/pkg/prom"
 	"tkestack.io/kvass/pkg/scrape"
@@ -31,7 +32,14 @@ import (
 
 // Shard is a prometheus shard
 type Shard struct {
-	// ID is the unique ID for differentiate different replicate of shard
+	// ID is the unique ID for differentiate each shard
+	ID       string
+	Replicas []*Replica
+	log      logrus.FieldLogger
+}
+
+type Replica struct {
+	// ID is the unique ID for differentiate different replica of shard
 	ID string
 	// APIGet is a function to do stand api request to target
 	// exposed this field for user to writ unit testing easily
@@ -40,36 +48,44 @@ type Shard struct {
 	// exposed this field for user to writ unit testing easily
 	APIPost func(url string, req interface{}, ret interface{}) (err error)
 	// scraping is the cached ScrapeStatus fetched from sidecar last time
+	// TODO: undo caps
 	scraping map[uint64]*target.ScrapeStatus
 	url      string
 	log      logrus.FieldLogger
 	// Ready indicate this shard is ready
-	Ready bool
+	ready bool
 }
 
-// NewShard create a Shard with empty scraping cache
-func NewShard(id string, url string, ready bool, log logrus.FieldLogger) *Shard {
+// NewShard create a Shard
+func NewShard(id string, reps []*Replica, log logrus.FieldLogger) *Shard {
 	return &Shard{
+		ID:       id,
+		Replicas: reps,
+		log: log,
+	}
+}
+
+// NewReplica create a Repica with empty scraping cache
+func NewReplica(id string, url string, ready bool, log logrus.FieldLogger) *Replica {
+	return &Replica{
 		ID:      id,
 		APIGet:  api.Get,
 		APIPost: api.Post,
 		url:     url,
 		log:     log,
-		Ready:   ready,
+		ready:   ready,
 	}
 }
 
-//Samples return the sample statistics of last scrape
-func (r *Shard) Samples(jobName string, withMetricsDetail bool) (map[string]*scrape.StatisticsSeriesResult, error) {
-	ret := map[string]*scrape.StatisticsSeriesResult{}
-	param := url.Values{}
-	if jobName != "" {
-		param["job"] = []string{jobName}
-	}
-	if withMetricsDetail {
-		param["with_metrics_detail"] = []string{"true"}
-	}
+type scrapeStatSeries map[string]*scrape.StatisticsSeriesResult
+type scrapeStatSeriesResp struct {
+	data   scrapeStatSeries
+	status bool
+}
 
+//Samples return the sample statistics of last scrape
+func (r *Replica) Samples(param url.Values) (*scrapeStatSeries, error) {
+	ret := scrapeStatSeries{}
 	u := r.url + "/api/v1/shard/samples/"
 	if len(param) != 0 {
 		u += "?" + param.Encode()
@@ -80,11 +96,48 @@ func (r *Shard) Samples(jobName string, withMetricsDetail bool) (map[string]*scr
 		return nil, fmt.Errorf("get samples info from %s failed : %s", r.ID, err.Error())
 	}
 
-	return ret, nil
+	return &ret, nil
+}
+
+//Samples return the sample statistics of last scrape
+func (s *Shard) Samples(jobName string, withMetricsDetail bool) (scrapeStatSeries, error) {
+	result := make([]*scrapeStatSeriesResp, len(s.Replicas))
+	param := url.Values{}
+	if jobName != "" {
+		param["job"] = []string{jobName}
+	}
+	if withMetricsDetail {
+		param["with_metrics_detail"] = []string{"true"}
+	}
+
+	// TODO: use generic/common for below pattern
+	g := errgroup.Group{}
+	for i, rep := range s.Replicas {
+		rep := rep
+		i := i
+		g.Go(func() error {
+			res, err := rep.Samples(param)
+			if err != nil {
+				return err
+			}
+			result[i] = &scrapeStatSeriesResp{*res, true}
+
+			return nil
+		})
+	}
+	err := g.Wait()
+	// return the data from any succesful shard replica
+	for _, res := range result {
+		if res.status {
+			return res.data, nil
+		}
+	}
+
+	return scrapeStatSeries{}, err
 }
 
 // RuntimeInfo return the runtime status of this shard
-func (r *Shard) RuntimeInfo() (*RuntimeInfo, error) {
+func (r *Replica) RuntimeInfo() (*RuntimeInfo, error) {
 	res := &RuntimeInfo{}
 	err := r.APIGet(r.url+"/api/v1/shard/runtimeinfo/", &res)
 	if err != nil {
@@ -94,40 +147,82 @@ func (r *Shard) RuntimeInfo() (*RuntimeInfo, error) {
 	return res, nil
 }
 
-// TargetStatus return the target runtime status that Group scraping
-// cached result will be send if something wrong
-func (r *Shard) TargetStatus() (map[uint64]*target.ScrapeStatus, error) {
-	res := map[uint64]*target.ScrapeStatus{}
-
-	err := r.APIGet(r.url+"/api/v1/shard/targets/status/", &res)
-	if err != nil {
-		return res, errors.Wrapf(err, "get targets status info from %s failed, url = %s", r.ID, r.url)
-	}
-
-	//must copy
-	m := map[uint64]*target.ScrapeStatus{}
-	for k, v := range res {
-		newV := *v
-		m[k] = &newV
-	}
-
-	r.scraping = m
-	return res, nil
+type scrapeStatus map[uint64]*target.ScrapeStatus
+type scrapeStatusResult struct {
+	data   scrapeStatus
+	status bool
 }
 
-// UpdateConfig try update shard config by API
-func (r *Shard) UpdateConfig(req *UpdateConfigRequest) error {
+// TargetStatus return the target runtime status that Group scraping
+// cached result will be send if something wrong
+func (s *Shard) TargetStatus() (scrapeStatus, error) {
+	g := errgroup.Group{}
+	result := make([]*scrapeStatusResult, len(s.Replicas))
+
+	for i, rep := range s.Replicas {
+		rep := rep
+		i := i
+		g.Go(func() error {
+			res := map[uint64]*target.ScrapeStatus{}
+			err := rep.APIGet(rep.url+"/api/v1/shard/targets/status/", &res)
+			if err != nil {
+				return errors.Wrapf(err, "get targets status info from %s failed, url = %s", rep.ID, rep.url)
+			}
+
+			//must copy
+			m := scrapeStatus{}
+			for k, v := range res {
+				newV := *v
+				m[k] = &newV
+			}
+			rep.scraping = m
+			result[i] = &scrapeStatusResult{res, true}
+
+			return nil
+		})
+	}
+	err := g.Wait()
+
+	// return the data from any succesful shard replica
+	for _, res := range result {
+		if res.status {
+			return res.data, nil
+		}
+	}
+
+	return scrapeStatus{}, err
+}
+
+// UpdateConfig try update replica config by API
+func (r *Replica) UpdateConfig(req *UpdateConfigRequest) error {
 	return r.APIPost(r.url+"/api/v1/status/config", req, nil)
 }
 
+// UpdateConfig try update shard config by API
+func (s *Shard) UpdateConfig(req *UpdateConfigRequest) error {
+	g := errgroup.Group{}
+	for _, rep := range s.Replicas {
+		rep := rep
+		g.Go(func() error { return rep.UpdateConfig(req) })
+	}
+	return g.Wait()
+}
+
 // UpdateExtraConfig try update shard extra config by API
-func (r *Shard) UpdateExtraConfig(req *prom.ExtraConfig) error {
-	return r.APIPost(r.url+"/api/v1/status/extra_config", req, nil)
+func (s *Shard) UpdateExtraConfig(req *prom.ExtraConfig) error {
+	g := errgroup.Group{}
+	for _, rep := range s.Replicas {
+		rep := rep
+		g.Go(func() error {
+			return rep.APIPost(rep.url+"/api/v1/status/extra_config", req, nil)
+		})
+	}
+	return g.Wait()
 }
 
 // UpdateTarget try apply targets to sidecar
 // request will be skipped if nothing changed according to r.scraping
-func (r *Shard) UpdateTarget(request *UpdateTargetsRequest) error {
+func (s *Shard) UpdateTarget(request *UpdateTargetsRequest) error {
 	newTargets := map[uint64]*target.Target{}
 	for _, ts := range request.Targets {
 		for _, t := range ts {
@@ -135,19 +230,23 @@ func (r *Shard) UpdateTarget(request *UpdateTargetsRequest) error {
 		}
 	}
 
-	if r.needUpdate(newTargets) {
-		if len(newTargets) != 0 || len(r.scraping) != 0 {
-			r.log.Infof("%s need update targets", r.ID)
-		}
-		if err := r.APIPost(r.url+"/api/v1/shard/targets/", &request, nil); err != nil {
-			return err
-		}
+	g := errgroup.Group{}
+	for _, rep := range s.Replicas {
+		rep := rep
+		g.Go(func() error {
+			if rep.needUpdate(newTargets) {
+				if len(newTargets) != 0 || len(rep.scraping) != 0 {
+					rep.log.Info("need update targets")
+				}
+				return rep.APIPost(rep.url+"/api/v1/shard/targets/", &request, nil)
+			}
+			return nil
+		})
 	}
-
-	return nil
+	return g.Wait()
 }
 
-func (r *Shard) needUpdate(targets map[uint64]*target.Target) bool {
+func (r *Replica) needUpdate(targets map[uint64]*target.Target) bool {
 	if len(targets) != len(r.scraping) || len(targets) == 0 {
 		return true
 	}
@@ -158,4 +257,12 @@ func (r *Shard) needUpdate(targets map[uint64]*target.Target) bool {
 		}
 	}
 	return false
+}
+
+// Ready returns true if any of the shard replica is ready
+func (s *Shard) Ready() (ready bool) {
+	for _, rep := range s.Replicas {
+		ready = ready || rep.ready
+	}
+	return
 }

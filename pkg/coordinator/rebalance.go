@@ -120,7 +120,8 @@ func (c *Coordinator) getOneShardInfo(s *shard.Shard) *shardInfo {
 		si  = newShardInfo(s)
 	)
 
-	if !s.Ready {
+	// if !s.Ready {
+	if !s.Ready() {
 		c.log.Infof("%s is not ready", s.ID)
 		return si
 	}
@@ -131,34 +132,36 @@ func (c *Coordinator) getOneShardInfo(s *shard.Shard) *shardInfo {
 		return si
 	}
 
-	si.runtime, err = s.RuntimeInfo()
-	if err != nil {
-		c.log.Error(err.Error())
-		return si
-	}
-
 	cfg := c.getConfig()
-	// try update config to send raw config to
-	if si.runtime.ConfigHash != cfg.ConfigHash {
-		c.log.Infof("shard %s config need update", si.shard.ID)
-		if err := s.UpdateConfig(&shard.UpdateConfigRequest{
-			RawContent: string(cfg.RawContent),
-		}); err != nil {
-			c.log.Error(err.Error())
-			return si
-		}
-
-		// reload runtime
-		si.runtime, err = s.RuntimeInfo()
+	for _, rep := range s.Replicas {
+		runtime, err := rep.RuntimeInfo()
 		if err != nil {
 			c.log.Error(err.Error())
+			continue
+		}
+
+		// try update config to send raw config to
+		if runtime.ConfigHash != cfg.ConfigHash {
+			c.log.Infof("shard %s replica %s config need update", si.shard.ID, rep.ID)
+			if err := rep.UpdateConfig(&shard.UpdateConfigRequest{
+				RawContent: string(cfg.RawContent),
+			}); err != nil {
+				c.log.Error(err.Error())
+				continue
+			}
+
+			// reload runtime
+			runtime, err = rep.RuntimeInfo()
+			if err != nil {
+				c.log.Error(err.Error())
+				continue
+			}
+		}
+		si.runtime = runtime
+		if si.runtime.ConfigHash != cfg.ConfigHash {
+			c.log.Warnf("config of %s is not up to date, expect md5 = %s, shard md5 = %s", si.shard.ID, cfg.ConfigHash, si.runtime.ConfigHash)
 			return si
 		}
-	}
-
-	if si.runtime.ConfigHash != cfg.ConfigHash {
-		c.log.Warnf("config of %s is not up to date, expect md5 = %s, shard md5 = %s", si.shard.ID, cfg.ConfigHash, si.runtime.ConfigHash)
-		return si
 	}
 
 	si.changeAble = true

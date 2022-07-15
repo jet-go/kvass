@@ -25,7 +25,7 @@ import (
 	"path"
 	"time"
 
-	"github.com/go-kit/kit/log"
+	"github.com/go-kit/log"
 	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/promlog"
 	"github.com/prometheus/prometheus/config"
@@ -37,7 +37,6 @@ import (
 	"golang.org/x/sync/errgroup"
 	"tkestack.io/kvass/pkg/prom"
 	"tkestack.io/kvass/pkg/shard"
-	"tkestack.io/kvass/pkg/shard/static"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -262,7 +261,9 @@ func getReplicasManager(lg logrus.FieldLogger) shard.ReplicasManager {
 			lg.WithField("component", "shard manager"))
 
 	case "static":
-		return static.NewReplicasManager(cdCfg.shardStaticFile, lg.WithField("component", "shard manager"))
+		// todo: implement static shard ha
+		// return static.NewReplicasManager(cdCfg.shardStaticFile, lg.WithField("component", "shard manager"))
+		return nil
 	default:
 		panic(fmt.Sprintf("unknown shard.type %s", cdCfg.shardType))
 	}

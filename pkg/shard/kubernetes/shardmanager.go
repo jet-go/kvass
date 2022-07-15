@@ -20,8 +20,11 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"sort"
+
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/errgroup"
 	v13 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	k8serr "k8s.io/apimachinery/pkg/api/errors"
@@ -33,7 +36,7 @@ import (
 
 // shardManager manager shards use kubernetes shardManager
 type shardManager struct {
-	sts *v13.StatefulSet
+	sts []*v13.StatefulSet
 	// port is the shard client port
 	port      int
 	deletePVC bool
@@ -44,7 +47,7 @@ type shardManager struct {
 
 // newShardManager create a new StatefulSet shards manager
 func newShardManager(cli kubernetes.Interface,
-	sts *v13.StatefulSet,
+	sts []*v13.StatefulSet,
 	port int,
 	deletePVC bool,
 	log logrus.FieldLogger) *shardManager {
@@ -55,66 +58,109 @@ func newShardManager(cli kubernetes.Interface,
 		cli:       cli,
 		deletePVC: deletePVC,
 		getPods: func(selector map[string]string) (list *v1.PodList, e error) {
-			return cli.CoreV1().Pods(sts.Namespace).List(context.TODO(), v12.ListOptions{
-				LabelSelector: labels.SelectorFromSet(selector).String(),
-			})
+			if len(sts) > 0 {
+				return cli.CoreV1().Pods(sts[0].Namespace).List(context.TODO(), v12.ListOptions{
+					LabelSelector: labels.SelectorFromSet(selector).String(),
+				})
+			}
+			return nil, errors.Errorf("no sts found")
 		},
 	}
 }
 
 // Shards return current Shards in the cluster
 func (s *shardManager) Shards() ([]*shard.Shard, error) {
-	pods, err := s.getPods(s.sts.Spec.Selector.MatchLabels)
-	if err != nil {
-		return nil, errors.Wrap(err, "list pod")
-	}
-
-	ps := map[string]v1.Pod{}
-
-	for _, p := range pods.Items {
-		ps[p.Name] = p
-	}
-
 	ret := make([]*shard.Shard, 0)
-	for index := range pods.Items {
-		p := ps[fmt.Sprintf("%s-%d", s.sts.Name, index)]
-		url := fmt.Sprintf("http://%s:%d", p.Status.PodIP, s.port)
-		ret = append(ret, shard.NewShard(p.Name, url, p.Status.PodIP != "", s.lg.WithField("shard", p.Name)))
+
+	shards := make(map[string][]*shard.Replica)
+
+	g := errgroup.Group{}
+	for _, sts := range s.sts {
+		sts := sts
+		g.Go(func() error {
+			pods, err := s.getPods(sts.Spec.Selector.MatchLabels)
+			if err != nil {
+				return errors.Wrap(err, "list pod")
+			}
+			ps := map[string]v1.Pod{}
+
+			for _, p := range pods.Items {
+				ps[p.Name] = p
+			}
+
+			for index := range pods.Items {
+				p := ps[fmt.Sprintf("%s-%d", sts.Name, index)]
+				url := fmt.Sprintf("http://%s:%d", p.Status.PodIP, s.port)
+				shardName := fmt.Sprintf("shard-%d", index)
+
+				rep := shard.NewReplica(p.Name, url, p.Status.PodIP != "", s.lg.WithFields(logrus.Fields{
+					"shard":   shardName,
+					"replica": p.Name,
+				}))
+				if sh, ok := shards[shardName]; ok {
+					shards[shardName] = append(sh, rep)
+					continue
+				}
+				shards[shardName] = []*shard.Replica{rep}
+			}
+			return nil
+		})
 	}
+	err := g.Wait()
+	if err != nil {
+		return nil, err
+	}
+	for name, reps := range shards {
+		ret = append(ret, shard.NewShard(name, reps, s.lg.WithField("shard", name)))
+	}
+	sort.Slice(ret, func(i, j int) bool {
+		return ret[i].ID < ret[j].ID
+	})
+
+	s.lg.Infof("total shards is %d", len(ret))
 
 	return ret, nil
 }
 
 // ChangeScale create or delete Shards according to "expReplicate"
 func (s *shardManager) ChangeScale(expect int32) error {
-	sts, err := s.cli.AppsV1().StatefulSets(s.sts.Namespace).Get(context.TODO(), s.sts.Name, v12.GetOptions{})
-	if err != nil {
-		return err
-	}
+	g := errgroup.Group{}
+	for _, st := range s.sts {
+		st := st
+		g.Go(func() error {
+			sts, err := s.cli.AppsV1().StatefulSets(st.Namespace).Get(context.TODO(), st.Name, v12.GetOptions{})
+			if err != nil {
+				return err
+			}
 
-	if sts.Spec.Replicas == nil || *sts.Spec.Replicas == expect {
-		return nil
-	}
+			if sts.Spec.Replicas == nil || *sts.Spec.Replicas == expect {
+				return nil
+			}
 
-	old := *sts.Spec.Replicas
-	sts.Spec.Replicas = &expect
-	s.lg.Infof("change scale to %d", expect)
-	_, err = s.cli.AppsV1().StatefulSets(sts.Namespace).Update(context.TODO(), sts, v12.UpdateOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "update statefuleset %s replicate failed", sts.Name)
+			old := *sts.Spec.Replicas
+			sts.Spec.Replicas = &expect
+			s.lg.Infof("change scale to %d for sts %s", expect, st.Name)
+			_, err = s.cli.AppsV1().StatefulSets(sts.Namespace).Update(context.TODO(), sts, v12.UpdateOptions{})
+			if err != nil {
+				return errors.Wrapf(err, "update statefuleset %s replicate failed", sts.Name)
 
-	}
+			}
 
-	if s.deletePVC {
-		for i := old - 1; i >= expect; i-- {
-			for _, pvc := range sts.Spec.VolumeClaimTemplates {
-				name := fmt.Sprintf("%s-%s-%d", pvc.Name, sts.Name, i)
-				err = s.cli.CoreV1().PersistentVolumeClaims(sts.Namespace).Delete(context.TODO(), name, v12.DeleteOptions{})
-				if err != nil && !k8serr.IsNotFound(err) {
-					s.lg.Errorf("delete pvc %s failed : %s", name, err.Error())
+			if s.deletePVC {
+				for i := old - 1; i >= expect; i-- {
+					for _, pvc := range sts.Spec.VolumeClaimTemplates {
+						name := fmt.Sprintf("%s-%s-%d", pvc.Name, sts.Name, i)
+						err = s.cli.CoreV1().PersistentVolumeClaims(sts.Namespace).Delete(context.TODO(), name, v12.DeleteOptions{})
+						if err != nil && !k8serr.IsNotFound(err) {
+							s.lg.Errorf("delete pvc %s failed : %s", name, err.Error())
+						}
+					}
 				}
 			}
-		}
+			return nil
+		})
 	}
-	return nil
+	err := g.Wait()
+
+	return err
 }
